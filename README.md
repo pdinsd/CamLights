@@ -12,6 +12,10 @@
 [![Status: early development](https://img.shields.io/badge/status-early%20development-yellow)](#roadmap)
 [![Last commit](https://img.shields.io/github/last-commit/pdinsd/CamLights)](https://github.com/pdinsd/CamLights/commits/main)
 
+<br>
+
+![CamLights with an EOS camera feed, image controls and green screen settings](docs/screenshot.jpg)
+
 </div>
 
 ---
