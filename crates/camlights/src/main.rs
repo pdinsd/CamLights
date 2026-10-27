@@ -30,6 +30,10 @@ fn claim_single_instance() -> bool {
 
 fn main() -> eframe::Result {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
+    // The elevated install/uninstall helper runs without a window and alongside the main instance.
+    if let Some(code) = vcam::run_command_line() {
+        std::process::exit(code);
+    }
     if !claim_single_instance() {
         log::info!("CamLights is already running");
         return Ok(());

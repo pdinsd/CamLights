@@ -7,13 +7,14 @@ use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use camlights_capture::{Backends, DeviceInfo, FrameSource, VideoFormat, mf::MfRuntime};
-use camlights_core::{Frame, ImageControls, process};
+use camlights_core::{Frame, ImageControls, Overlay, OverlayRenderer, process};
 
 use crate::vcam::{self, VirtualCamera};
 
 /// Settings the engine starts with.
 pub struct Config {
     pub controls: ImageControls,
+    pub overlays: Vec<Overlay>,
     pub virtual_camera: bool,
     /// Folder holding the user's `EDSDK.dll`; `None` searches next to the executable.
     pub edsdk_dir: Option<PathBuf>,
@@ -34,6 +35,8 @@ pub enum Command {
 #[derive(Clone, Default)]
 pub struct VirtualCameraStatus {
     pub installed: bool,
+    /// The installed copy is from a different build than this executable's.
+    pub outdated: bool,
     pub running: bool,
     /// The resolution an application is currently reading.
     pub client: Option<(u32, u32)>,
@@ -53,6 +56,8 @@ pub struct Status {
     pub virtual_camera: VirtualCameraStatus,
     /// Where Canon EDSDK was loaded from, or why it is unavailable.
     pub canon: Result<PathBuf, String>,
+    /// Why some overlays could not be drawn.
+    pub overlay_errors: Vec<String>,
 }
 
 impl Default for Status {
@@ -67,6 +72,7 @@ impl Default for Status {
             error: None,
             virtual_camera: VirtualCameraStatus::default(),
             canon: Err("not loaded yet".to_owned()),
+            overlay_errors: Vec::new(),
         }
     }
 }
@@ -75,6 +81,7 @@ impl Default for Status {
 pub struct Shared {
     pub status: Mutex<Status>,
     pub controls: Mutex<ImageControls>,
+    pub overlays: Mutex<Vec<Overlay>>,
     frame: Mutex<Option<Arc<Frame>>>,
     frame_seq: AtomicU64,
 }
@@ -108,7 +115,11 @@ pub struct Engine {
 impl Engine {
     /// Starts the capture thread. `notify` is called whenever status or the frame changes.
     pub fn start(config: Config, notify: impl Fn() + Send + 'static) -> Self {
-        let shared = Arc::new(Shared { controls: Mutex::new(config.controls.clone()), ..Default::default() });
+        let shared = Arc::new(Shared {
+            controls: Mutex::new(config.controls.clone()),
+            overlays: Mutex::new(config.overlays.clone()),
+            ..Default::default()
+        });
         let (commands, rx) = mpsc::channel();
         let thread_shared = shared.clone();
         let thread = std::thread::Builder::new()
@@ -167,6 +178,12 @@ impl FpsCounter {
     }
 }
 
+/// The font for text overlays: Segoe UI, falling back to Arial.
+fn system_font() -> Option<Vec<u8>> {
+    let fonts = std::path::Path::new(&std::env::var_os("SystemRoot")?).join("Fonts");
+    ["segoeui.ttf", "arial.ttf"].iter().find_map(|name| std::fs::read(fonts.join(name)).ok())
+}
+
 fn load_backends(edsdk_dir: Option<&std::path::Path>, shared: &Shared) -> Backends {
     let backends = Backends::new(edsdk_dir);
     let canon = backends.canon_status().map(|p| p.to_path_buf()).map_err(str::to_owned);
@@ -188,7 +205,9 @@ fn refresh_devices(backends: &Backends, shared: &Shared) {
 
 /// Starts or stops the virtual camera to match `enabled` and the current registration.
 fn sync_virtual_camera(camera: &mut Option<VirtualCamera>, enabled: bool, shared: &Shared) {
-    let installed = vcam::registered_dll().is_some();
+    let registered = vcam::registered_dll();
+    let installed = registered.is_some();
+    let outdated = registered.as_deref().is_some_and(vcam::registered_is_outdated);
     let mut error = None;
     if !(enabled && installed) {
         *camera = None;
@@ -199,7 +218,7 @@ fn sync_virtual_camera(camera: &mut Option<VirtualCamera>, enabled: bool, shared
         }
     }
     let running = camera.is_some();
-    shared.update_status(|s| s.virtual_camera = VirtualCameraStatus { installed, running, client: None, error });
+    shared.update_status(|s| s.virtual_camera = VirtualCameraStatus { installed, outdated, running, client: None, error });
 }
 
 fn run(commands: mpsc::Receiver<Command>, shared: &Shared, config: Config, notify: &dyn Fn()) {
@@ -217,6 +236,8 @@ fn run(commands: mpsc::Receiver<Command>, shared: &Shared, config: Config, notif
     let mut virtual_camera: Option<VirtualCamera> = None;
     sync_virtual_camera(&mut virtual_camera, virtual_camera_enabled, shared);
     notify();
+
+    let mut overlay_renderer = OverlayRenderer::new(system_font());
 
     // Declared after `backends` so an open camera is dropped before the SDK that serves it.
     let mut source: Option<Box<dyn FrameSource>> = None;
@@ -290,7 +311,12 @@ fn run(commands: mpsc::Receiver<Command>, shared: &Shared, config: Config, notif
         match camera.next_frame() {
             Ok(raw) => {
                 let controls = shared.controls.lock().unwrap().clone();
-                let processed = process(&raw, &controls);
+                let mut processed = process(&raw, &controls);
+                let overlays = shared.overlays.lock().unwrap().clone();
+                let overlay_errors = overlay_renderer.apply(&mut processed, &overlays);
+                if shared.status.lock().unwrap().overlay_errors != overlay_errors {
+                    shared.update_status(|s| s.overlay_errors = overlay_errors);
+                }
                 if let Some(camera) = virtual_camera.as_mut() {
                     let client = camera.send(&processed);
                     if shared.status.lock().unwrap().virtual_camera.client != client {

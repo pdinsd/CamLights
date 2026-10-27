@@ -2,7 +2,7 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
 use camlights_capture::VideoFormat;
-use camlights_core::{ImageControls, OutputSize, Rotation};
+use camlights_core::{ImageControls, OutputSize, Overlay, OverlayContent, Rotation};
 use camlights_vcam_shared::FRIENDLY_NAME;
 use eframe::egui::{self, Button, CentralPanel, Color32, ComboBox, Panel, ScrollArea, Slider, TextureHandle, TextureOptions};
 use serde::{Deserialize, Serialize};
@@ -16,6 +16,7 @@ const STORAGE_KEY: &str = "camlights";
 #[serde(default)]
 struct Persisted {
     controls: ImageControls,
+    overlays: Vec<Overlay>,
     device_id: Option<String>,
     format: Option<VideoFormat>,
     virtual_camera: bool,
@@ -24,7 +25,14 @@ struct Persisted {
 
 impl Default for Persisted {
     fn default() -> Self {
-        Self { controls: ImageControls::default(), device_id: None, format: None, virtual_camera: true, edsdk_dir: None }
+        Self {
+            controls: ImageControls::default(),
+            overlays: Vec::new(),
+            device_id: None,
+            format: None,
+            virtual_camera: true,
+            edsdk_dir: None,
+        }
     }
 }
 
@@ -40,6 +48,7 @@ enum Registration {
 pub struct CamLightsApp {
     engine: Engine,
     controls: ImageControls,
+    overlays: Vec<Overlay>,
     /// The camera to reopen on the next start, and its chosen format.
     device_id: Option<String>,
     format: Option<VideoFormat>,
@@ -57,6 +66,7 @@ impl CamLightsApp {
         let ctx = cc.egui_ctx.clone();
         let config = Config {
             controls: persisted.controls.clone(),
+            overlays: persisted.overlays.clone(),
             virtual_camera: persisted.virtual_camera,
             edsdk_dir: persisted.edsdk_dir.clone(),
         };
@@ -64,6 +74,7 @@ impl CamLightsApp {
         Self {
             engine,
             controls: persisted.controls,
+            overlays: persisted.overlays,
             device_id: persisted.device_id,
             format: persisted.format,
             virtual_camera: persisted.virtual_camera,
@@ -75,14 +86,14 @@ impl CamLightsApp {
         }
     }
 
-    /// Runs the elevated `regsvr32` on a helper thread so the window stays responsive during the UAC prompt.
+    /// Runs the elevated installer on a helper thread so the window stays responsive during the UAC prompt.
     fn change_registration(&self, unregister: bool, ctx: &egui::Context) {
         let Some(commands) = self.engine.sender() else { return };
         let registration = self.registration.clone();
         let ctx = ctx.clone();
         *registration.lock().unwrap() = Registration::Running;
         std::thread::spawn(move || {
-            let outcome = vcam::run_regsvr32(unregister);
+            let outcome = vcam::change_installation(unregister);
             *registration.lock().unwrap() = match outcome {
                 Ok(()) => Registration::Idle,
                 Err(e) => Registration::Failed(format!("{e:#}")),
@@ -188,8 +199,21 @@ impl CamLightsApp {
                 (true, None) => ui.label(format!("Ready: choose {FRIENDLY_NAME} in your video app.")),
                 (false, _) => ui.label("Off."),
             };
-            if ui.add_enabled(!busy, Button::new("Uninstall…")).on_hover_text("Requires administrator approval").clicked() {
-                self.change_registration(true, ui.ctx());
+            ui.horizontal(|ui| {
+                if state.outdated
+                    && ui
+                        .add_enabled(!busy, Button::new("Update…"))
+                        .on_hover_text("Install the virtual camera from this CamLights build (requires administrator approval)")
+                        .clicked()
+                {
+                    self.change_registration(false, ui.ctx());
+                }
+                if ui.add_enabled(!busy, Button::new("Uninstall…")).on_hover_text("Requires administrator approval").clicked() {
+                    self.change_registration(true, ui.ctx());
+                }
+            });
+            if state.outdated {
+                ui.colored_label(Color32::LIGHT_YELLOW, "The installed virtual camera is from a different CamLights build.");
             }
         } else {
             ui.label("Install the virtual camera so Zoom, Teams, OBS and browsers can use CamLights.");
@@ -242,6 +266,67 @@ impl CamLightsApp {
         }
     }
 
+    fn overlays_ui(&mut self, ui: &mut egui::Ui, status: &Status) {
+        ui.heading("Overlays");
+        ui.horizontal(|ui| {
+            if ui.button("Add text").clicked() {
+                self.overlays.push(Overlay::text("Your name"));
+            }
+            if ui.button("Add image…").clicked()
+                && let Some(path) = rfd::FileDialog::new().add_filter("Images", &["png", "jpg", "jpeg"]).pick_file()
+            {
+                self.overlays.push(Overlay::image(path));
+            }
+        });
+
+        let mut remove = None;
+        for (index, overlay) in self.overlays.iter_mut().enumerate() {
+            ui.push_id(index, |ui| {
+                egui::Frame::group(ui.style()).show(ui, |ui| {
+                    ui.horizontal(|ui| {
+                        ui.checkbox(&mut overlay.enabled, "");
+                        match &mut overlay.content {
+                            OverlayContent::Text { text, .. } => {
+                                ui.add(egui::TextEdit::multiline(text).desired_rows(1).desired_width(190.0));
+                            }
+                            OverlayContent::Image { path } => {
+                                let name = path.file_name().map_or_else(|| path.display().to_string(), |n| n.to_string_lossy().into_owned());
+                                ui.label(name).on_hover_text(path.display().to_string());
+                            }
+                        }
+                        if ui.small_button("✕").on_hover_text("Remove").clicked() {
+                            remove = Some(index);
+                        }
+                    });
+                    if let OverlayContent::Text { color, background, .. } = &mut overlay.content {
+                        ui.horizontal(|ui| {
+                            ui.label("Text");
+                            ui.color_edit_button_srgba_unmultiplied(color);
+                            let mut boxed = background.is_some();
+                            if ui.checkbox(&mut boxed, "Background").changed() {
+                                *background = boxed.then_some([0, 0, 0, 160]);
+                            }
+                            if let Some(back) = background {
+                                ui.color_edit_button_srgba_unmultiplied(back);
+                            }
+                        });
+                    }
+                    let size_range = if matches!(overlay.content, OverlayContent::Text { .. }) { 0.02..=0.3 } else { 0.03..=1.0 };
+                    ui.add(Slider::new(&mut overlay.size, size_range).text("Size"));
+                    ui.add(Slider::new(&mut overlay.position[0], 0.0..=1.0).text("X"));
+                    ui.add(Slider::new(&mut overlay.position[1], 0.0..=1.0).text("Y"));
+                    ui.add(Slider::new(&mut overlay.opacity, 0.0..=1.0).text("Opacity"));
+                });
+            });
+        }
+        if let Some(index) = remove {
+            self.overlays.remove(index);
+        }
+        for error in &status.overlay_errors {
+            ui.colored_label(Color32::LIGHT_RED, error);
+        }
+    }
+
     fn preview_ui(&self, ui: &mut egui::Ui) {
         match &self.texture {
             Some(texture) => {
@@ -262,7 +347,7 @@ impl eframe::App for CamLightsApp {
         self.auto_open(&status);
         self.update_texture(ui.ctx());
 
-        let before = self.controls.clone();
+        let before = (self.controls.clone(), self.overlays.clone());
         Panel::left("controls").resizable(false).exact_size(300.0).show(ui, |ui| {
             ScrollArea::vertical().show(ui, |ui| {
                 self.camera_ui(ui, &status);
@@ -270,10 +355,15 @@ impl eframe::App for CamLightsApp {
                 self.virtual_camera_ui(ui, &status);
                 ui.separator();
                 self.image_ui(ui);
+                ui.separator();
+                self.overlays_ui(ui, &status);
             });
         });
-        if self.controls != before {
+        if self.controls != before.0 {
             *self.engine.shared().controls.lock().unwrap() = self.controls.clone();
+        }
+        if self.overlays != before.1 {
+            *self.engine.shared().overlays.lock().unwrap() = self.overlays.clone();
         }
 
         CentralPanel::default().show(ui, |ui| self.preview_ui(ui));
@@ -282,6 +372,7 @@ impl eframe::App for CamLightsApp {
     fn save(&mut self, storage: &mut dyn eframe::Storage) {
         let persisted = Persisted {
             controls: self.controls.clone(),
+            overlays: self.overlays.clone(),
             device_id: self.device_id.clone(),
             format: self.format.clone(),
             virtual_camera: self.virtual_camera,

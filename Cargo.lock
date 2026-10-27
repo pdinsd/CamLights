@@ -664,7 +664,9 @@ dependencies = [
 name = "camlights-core"
 version = "0.1.0"
 dependencies = [
+ "ab_glyph",
  "anyhow",
+ "image",
  "rayon",
  "serde",
 ]
@@ -1784,6 +1786,8 @@ dependencies = [
  "num-traits",
  "png",
  "tiff",
+ "zune-core",
+ "zune-jpeg",
 ]
 
 [[package]]
