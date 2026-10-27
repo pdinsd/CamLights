@@ -1,19 +1,20 @@
 //! The capture thread: owns Media Foundation, the open camera and frame processing.
 
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, mpsc};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use camlights_capture::{Backends, DeviceInfo, FrameSource, VideoFormat, mf::MfRuntime};
-use camlights_core::{Frame, ImageControls, Overlay, OverlayRenderer, process};
+use camlights_core::{BackgroundCompositor, ChromaKey, Frame, ImageControls, Overlay, OverlayRenderer, process};
 
 use crate::vcam::{self, VirtualCamera};
 
 /// Settings the engine starts with.
 pub struct Config {
     pub controls: ImageControls,
+    pub chroma_key: ChromaKey,
     pub overlays: Vec<Overlay>,
     pub virtual_camera: bool,
     /// Folder holding the user's `EDSDK.dll`; `None` searches next to the executable.
@@ -60,6 +61,8 @@ pub struct Status {
     pub overlay_errors: Vec<String>,
     /// Where each overlay was last drawn, normalised `[left, top, right, bottom]`.
     pub overlay_bounds: Vec<Option<[f32; 4]>>,
+    /// Why the green screen background could not be applied.
+    pub background_error: Option<String>,
 }
 
 impl Default for Status {
@@ -76,6 +79,7 @@ impl Default for Status {
             canon: Err("not loaded yet".to_owned()),
             overlay_errors: Vec::new(),
             overlay_bounds: Vec::new(),
+            background_error: None,
         }
     }
 }
@@ -85,11 +89,33 @@ pub struct Shared {
     pub status: Mutex<Status>,
     pub controls: Mutex<ImageControls>,
     pub overlays: Mutex<Vec<Overlay>>,
+    pub chroma_key: Mutex<ChromaKey>,
+    /// While set, frames are published unkeyed so a key colour can be picked from the preview.
+    pub picking_key: AtomicBool,
     frame: Mutex<Option<Arc<Frame>>>,
     frame_seq: AtomicU64,
 }
 
 impl Shared {
+    /// The colour around normalised point `at` in the latest frame, averaged over a few pixels.
+    pub fn sample_color(&self, at: [f32; 2]) -> Option<[u8; 3]> {
+        let frame = self.frame.lock().unwrap().clone()?;
+        let cx = (at[0].clamp(0.0, 1.0) * (frame.width - 1) as f32).round() as i64;
+        let cy = (at[1].clamp(0.0, 1.0) * (frame.height - 1) as f32).round() as i64;
+        let mut sum = [0u32; 3];
+        let mut count = 0;
+        for y in (cy - 2).max(0)..=(cy + 2).min(frame.height as i64 - 1) {
+            for x in (cx - 2).max(0)..=(cx + 2).min(frame.width as i64 - 1) {
+                let px = &frame.data[(y as usize * frame.width as usize + x as usize) * 4..][..3];
+                for c in 0..3 {
+                    sum[c] += px[c] as u32;
+                }
+                count += 1;
+            }
+        }
+        (count > 0).then(|| sum.map(|s| (s / count) as u8))
+    }
+
     /// Returns the latest processed frame if it is newer than `seen`.
     pub fn latest_frame(&self, seen: u64) -> Option<(u64, Arc<Frame>)> {
         let seq = self.frame_seq.load(Ordering::Acquire);
@@ -121,6 +147,7 @@ impl Engine {
         let shared = Arc::new(Shared {
             controls: Mutex::new(config.controls.clone()),
             overlays: Mutex::new(config.overlays.clone()),
+            chroma_key: Mutex::new(config.chroma_key.clone()),
             ..Default::default()
         });
         let (commands, rx) = mpsc::channel();
@@ -241,6 +268,7 @@ fn run(commands: mpsc::Receiver<Command>, shared: &Shared, config: Config, notif
     notify();
 
     let mut overlay_renderer = OverlayRenderer::new(system_font());
+    let mut background = BackgroundCompositor::default();
 
     // Declared after `backends` so an open camera is dropped before the SDK that serves it.
     let mut source: Option<Box<dyn FrameSource>> = None;
@@ -315,6 +343,13 @@ fn run(commands: mpsc::Receiver<Command>, shared: &Shared, config: Config, notif
             Ok(raw) => {
                 let controls = shared.controls.lock().unwrap().clone();
                 let mut processed = process(&raw, &controls);
+                if !shared.picking_key.load(Ordering::Relaxed) {
+                    let chroma_key = shared.chroma_key.lock().unwrap().clone();
+                    let background_error = background.apply(&mut processed, &chroma_key);
+                    if shared.status.lock().unwrap().background_error != background_error {
+                        shared.update_status(|s| s.background_error = background_error);
+                    }
+                }
                 let overlays = shared.overlays.lock().unwrap().clone();
                 let overlay_errors = overlay_renderer.apply(&mut processed, &overlays);
                 let overlay_bounds = overlay_renderer.bounds();

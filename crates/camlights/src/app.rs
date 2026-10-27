@@ -2,7 +2,9 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
 use camlights_capture::VideoFormat;
-use camlights_core::{ImageControls, OutputSize, Overlay, OverlayContent, Rotation};
+use std::sync::atomic::Ordering;
+
+use camlights_core::{ChromaKey, ImageControls, OutputSize, Overlay, OverlayContent, Replacement, Rotation};
 use camlights_vcam_shared::FRIENDLY_NAME;
 use eframe::egui::{self, Button, CentralPanel, Color32, ComboBox, Panel, ScrollArea, Slider, TextureHandle, TextureOptions};
 use serde::{Deserialize, Serialize};
@@ -16,6 +18,7 @@ const STORAGE_KEY: &str = "camlights";
 #[serde(default)]
 struct Persisted {
     controls: ImageControls,
+    chroma_key: ChromaKey,
     overlays: Vec<Overlay>,
     device_id: Option<String>,
     format: Option<VideoFormat>,
@@ -27,6 +30,7 @@ impl Default for Persisted {
     fn default() -> Self {
         Self {
             controls: ImageControls::default(),
+            chroma_key: ChromaKey::default(),
             overlays: Vec::new(),
             device_id: None,
             format: None,
@@ -48,6 +52,9 @@ enum Registration {
 pub struct CamLightsApp {
     engine: Engine,
     controls: ImageControls,
+    chroma_key: ChromaKey,
+    /// The next click on the preview picks the key colour.
+    picking_key: bool,
     overlays: Vec<Overlay>,
     /// The camera to reopen on the next start, and its chosen format.
     device_id: Option<String>,
@@ -68,6 +75,7 @@ impl CamLightsApp {
         let ctx = cc.egui_ctx.clone();
         let config = Config {
             controls: persisted.controls.clone(),
+            chroma_key: persisted.chroma_key.clone(),
             overlays: persisted.overlays.clone(),
             virtual_camera: persisted.virtual_camera,
             edsdk_dir: persisted.edsdk_dir.clone(),
@@ -76,6 +84,8 @@ impl CamLightsApp {
         Self {
             engine,
             controls: persisted.controls,
+            chroma_key: persisted.chroma_key,
+            picking_key: false,
             overlays: persisted.overlays,
             device_id: persisted.device_id,
             format: persisted.format,
@@ -269,6 +279,54 @@ impl CamLightsApp {
         }
     }
 
+    fn green_screen_ui(&mut self, ui: &mut egui::Ui, status: &Status) {
+        ui.heading("Green screen");
+        let key = &mut self.chroma_key;
+        ui.checkbox(&mut key.enabled, "Replace the green screen");
+        ui.add_enabled_ui(key.enabled, |ui| {
+            ui.horizontal(|ui| {
+                ui.label("Key colour");
+                ui.color_edit_button_srgb(&mut key.key);
+                let label = if self.picking_key { "Click the screen in the preview…" } else { "Pick from preview" };
+                if ui.selectable_label(self.picking_key, label).clicked() {
+                    self.picking_key = !self.picking_key;
+                }
+            });
+            ui.add(Slider::new(&mut key.similarity, 0.05..=1.0).text("Similarity"))
+                .on_hover_text("How close to the key colour a pixel must be to disappear");
+            ui.add(Slider::new(&mut key.smoothness, 0.0..=0.5).text("Smoothness")).on_hover_text("Softness of the edges");
+            ui.add(Slider::new(&mut key.spill, 0.0..=1.0).text("Spill")).on_hover_text("Removes green tint reflected onto you");
+
+            ui.horizontal(|ui| {
+                ui.label("Background");
+                let is_color = matches!(key.replacement, Replacement::Color(_));
+                if ui.selectable_label(is_color, "Colour").clicked() && !is_color {
+                    key.replacement = Replacement::Color([32, 32, 40]);
+                }
+                if ui.selectable_label(!is_color, "Image…").clicked()
+                    && let Some(path) = rfd::FileDialog::new().add_filter("Images", &["png", "jpg", "jpeg"]).pick_file()
+                {
+                    key.replacement = Replacement::Image(path);
+                }
+            });
+            match &mut key.replacement {
+                Replacement::Color(rgb) => {
+                    ui.color_edit_button_srgb(rgb);
+                }
+                Replacement::Image(path) => {
+                    let name = path.file_name().map_or_else(|| path.display().to_string(), |n| n.to_string_lossy().into_owned());
+                    ui.label(name).on_hover_text(path.display().to_string());
+                }
+            }
+        });
+        if !key.enabled {
+            self.picking_key = false;
+        }
+        if let Some(error) = &status.background_error {
+            ui.colored_label(Color32::LIGHT_RED, error);
+        }
+    }
+
     fn overlays_ui(&mut self, ui: &mut egui::Ui, status: &Status) {
         ui.heading("Overlays");
         ui.horizontal(|ui| {
@@ -341,10 +399,22 @@ impl CamLightsApp {
         let size = texture.size_vec2();
         let scale = (area.width() / size.x).min(area.height() / size.y);
         let rect = egui::Rect::from_center_size(area.center(), size * scale);
-        let response = ui.allocate_rect(rect, egui::Sense::drag());
+        let response = ui.allocate_rect(rect, egui::Sense::click_and_drag());
         egui::Image::new(egui::load::SizedTexture::from_handle(texture)).paint_at(ui, rect);
 
         let normalise = |pos: egui::Pos2| [(pos.x - rect.min.x) / rect.width(), (pos.y - rect.min.y) / rect.height()];
+
+        if self.picking_key {
+            ui.ctx().set_cursor_icon(egui::CursorIcon::Crosshair);
+            if response.clicked()
+                && let Some(point) = response.interact_pointer_pos().map(normalise)
+                && let Some(color) = self.engine.shared().sample_color(point)
+            {
+                self.chroma_key.key = color;
+                self.picking_key = false;
+            }
+            return;
+        }
         // Topmost first: later overlays are drawn over earlier ones.
         let overlay_at = |point: [f32; 2]| {
             status.overlay_bounds.iter().enumerate().rev().find_map(|(index, bounds)| {
@@ -379,7 +449,7 @@ impl eframe::App for CamLightsApp {
         self.auto_open(&status);
         self.update_texture(ui.ctx());
 
-        let before = (self.controls.clone(), self.overlays.clone());
+        let before = (self.controls.clone(), self.overlays.clone(), self.chroma_key.clone());
         Panel::left("controls").resizable(false).exact_size(300.0).show(ui, |ui| {
             ScrollArea::vertical().show(ui, |ui| {
                 self.camera_ui(ui, &status);
@@ -387,6 +457,8 @@ impl eframe::App for CamLightsApp {
                 self.virtual_camera_ui(ui, &status);
                 ui.separator();
                 self.image_ui(ui);
+                ui.separator();
+                self.green_screen_ui(ui, &status);
                 ui.separator();
                 self.overlays_ui(ui, &status);
             });
@@ -399,11 +471,16 @@ impl eframe::App for CamLightsApp {
         if self.overlays != before.1 {
             *self.engine.shared().overlays.lock().unwrap() = self.overlays.clone();
         }
+        if self.chroma_key != before.2 {
+            *self.engine.shared().chroma_key.lock().unwrap() = self.chroma_key.clone();
+        }
+        self.engine.shared().picking_key.store(self.picking_key, Ordering::Relaxed);
     }
 
     fn save(&mut self, storage: &mut dyn eframe::Storage) {
         let persisted = Persisted {
             controls: self.controls.clone(),
+            chroma_key: self.chroma_key.clone(),
             overlays: self.overlays.clone(),
             device_id: self.device_id.clone(),
             format: self.format.clone(),
