@@ -22,7 +22,7 @@ Everything runs locally on your PC. CamLights has no account, no cloud service a
 
 ### Features
 
-- **Any Windows camera as input:** USB webcams, HDMI capture cards and camera vendor webcam drivers (for example Canon EOS Webcam Utility), with resolution and frame rate selection.
+- **Any Windows camera as input:** USB webcams, HDMI capture cards and camera vendor webcam drivers, with resolution and frame rate selection. Tested with a Canon EOS M50 through Canon EOS Webcam Utility.
 - **Canon EOS live view (experimental):** connect directly to Canon EOS cameras over USB through Canon's EDSDK, which you supply yourself (see [Requirements](#requirements)).
 - **Image controls:** mirror, flip, rotate, zoom and pan, brightness, contrast, saturation, and output resolution up to 1080p.
 - **Green screen:** chroma key with an eyedropper, adjustable similarity, edge smoothness and spill removal; replace the screen with a solid colour or any image.
