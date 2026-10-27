@@ -1,0 +1,17 @@
+[package]
+name = "camlights"
+version = "0.1.0"
+edition = "2024"
+
+[[bin]]
+name = "CamLights"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = "1.0.104"
+camlights-capture = { version = "0.1.0", path = "../camlights-capture" }
+camlights-core = { version = "0.1.0", path = "../camlights-core" }
+eframe = { version = "0.37.0", features = ["persistence"] }
+env_logger = "0.11.11"
+log = "0.4.34"
+serde = { version = "1.0.229", features = ["derive"] }
