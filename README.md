@@ -4,6 +4,8 @@
 
 **Webcam effects and a virtual camera for Windows 11, written in Rust.**
 
+[![CI](https://github.com/pdinsd/CamLights/actions/workflows/ci.yml/badge.svg)](https://github.com/pdinsd/CamLights/actions/workflows/ci.yml)
+[![Latest release](https://img.shields.io/github/v/release/pdinsd/CamLights)](https://github.com/pdinsd/CamLights/releases/latest)
 [![License: Apache 2.0](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
 [![Platform: Windows 11 x64](https://img.shields.io/badge/platform-Windows%2011%20x64-0078D6?logo=windows11&logoColor=white)](#requirements)
 [![Rust 2024 edition](https://img.shields.io/badge/rust-2024%20edition-DEA584?logo=rust&logoColor=white)](https://www.rust-lang.org/)
@@ -50,6 +52,14 @@ No Visual C++ redistributable is needed: release builds link the C runtime stati
 - PowerShell 7 to run the packaging script
 
 ## Installation
+
+### Download
+
+1. Download `CamLights-<version>.zip` from the [latest release](https://github.com/pdinsd/CamLights/releases/latest).
+2. Extract it anywhere, for example a folder in your user profile.
+3. Run `CamLights.exe`, then [install the virtual camera](#install-the-virtual-camera).
+
+The release binaries are not code-signed yet, so Windows SmartScreen may warn on first launch: choose **More info → Run anyway**.
 
 ### Build and package
 
