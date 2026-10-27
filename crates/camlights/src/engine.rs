@@ -58,6 +58,8 @@ pub struct Status {
     pub canon: Result<PathBuf, String>,
     /// Why some overlays could not be drawn.
     pub overlay_errors: Vec<String>,
+    /// Where each overlay was last drawn, normalised `[left, top, right, bottom]`.
+    pub overlay_bounds: Vec<Option<[f32; 4]>>,
 }
 
 impl Default for Status {
@@ -73,6 +75,7 @@ impl Default for Status {
             virtual_camera: VirtualCameraStatus::default(),
             canon: Err("not loaded yet".to_owned()),
             overlay_errors: Vec::new(),
+            overlay_bounds: Vec::new(),
         }
     }
 }
@@ -314,8 +317,16 @@ fn run(commands: mpsc::Receiver<Command>, shared: &Shared, config: Config, notif
                 let mut processed = process(&raw, &controls);
                 let overlays = shared.overlays.lock().unwrap().clone();
                 let overlay_errors = overlay_renderer.apply(&mut processed, &overlays);
-                if shared.status.lock().unwrap().overlay_errors != overlay_errors {
-                    shared.update_status(|s| s.overlay_errors = overlay_errors);
+                let overlay_bounds = overlay_renderer.bounds();
+                let changed = {
+                    let status = shared.status.lock().unwrap();
+                    status.overlay_errors != overlay_errors || status.overlay_bounds != overlay_bounds
+                };
+                if changed {
+                    shared.update_status(|s| {
+                        s.overlay_errors = overlay_errors;
+                        s.overlay_bounds = overlay_bounds.to_vec();
+                    });
                 }
                 if let Some(camera) = virtual_camera.as_mut() {
                     let client = camera.send(&processed);

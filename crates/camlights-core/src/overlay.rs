@@ -72,13 +72,20 @@ pub struct OverlayRenderer {
     /// Decoded source images, by path.
     images: HashMap<PathBuf, Result<Frame, String>>,
     rendered: Vec<Option<Rendered>>,
+    bounds: Vec<Option<[f32; 4]>>,
 }
 
 impl OverlayRenderer {
     /// `font_data` is a TrueType/OpenType font used for text; text overlays report an error without one.
     pub fn new(font_data: Option<Vec<u8>>) -> Self {
         let font = font_data.and_then(|data| FontArc::try_from_vec(data).ok());
-        Self { font, images: HashMap::new(), rendered: Vec::new() }
+        Self { font, images: HashMap::new(), rendered: Vec::new(), bounds: Vec::new() }
+    }
+
+    /// Where the last [`Self::apply`] drew each overlay, as normalised `[left, top, right, bottom]`
+    /// in output coordinates; `None` for overlays that drew nothing.
+    pub fn bounds(&self) -> &[Option<[f32; 4]>] {
+        &self.bounds
     }
 
     /// Draws every enabled overlay onto `frame` and returns the problems that prevented drawing some.
@@ -89,6 +96,8 @@ impl OverlayRenderer {
         self.images.retain(|path, _| overlays.iter().any(|o| matches!(&o.content, OverlayContent::Image { path: p } if p == path)));
 
         let mut errors = Vec::new();
+        self.bounds.clear();
+        self.bounds.resize(overlays.len(), None);
         for (index, overlay) in overlays.iter().enumerate() {
             if !overlay.enabled {
                 continue;
@@ -99,7 +108,13 @@ impl OverlayRenderer {
                 self.rendered[index] = Some(Rendered { overlay: overlay.clone(), output, bitmap });
             }
             match &self.rendered[index].as_ref().expect("rendered above").bitmap {
-                Ok(Some(bitmap)) => blend(frame, bitmap, overlay.position, overlay.opacity),
+                Ok(Some(bitmap)) => {
+                    blend(frame, bitmap, overlay.position, overlay.opacity);
+                    let half_w = bitmap.width as f32 / frame.width as f32 / 2.0;
+                    let half_h = bitmap.height as f32 / frame.height as f32 / 2.0;
+                    let [x, y] = overlay.position;
+                    self.bounds[index] = Some([x - half_w, y - half_h, x + half_w, y + half_h]);
+                }
                 Ok(None) => {}
                 Err(e) => errors.push(e.clone()),
             }

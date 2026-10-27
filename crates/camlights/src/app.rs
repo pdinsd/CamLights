@@ -56,6 +56,8 @@ pub struct CamLightsApp {
     edsdk_dir: Option<PathBuf>,
     registration: Arc<Mutex<Registration>>,
     auto_opened: bool,
+    /// The overlay being dragged in the preview, and the grab point's offset from its centre.
+    dragging: Option<(usize, [f32; 2])>,
     texture: Option<TextureHandle>,
     frame_seq: u64,
 }
@@ -81,6 +83,7 @@ impl CamLightsApp {
             edsdk_dir: persisted.edsdk_dir,
             registration: Arc::default(),
             auto_opened: false,
+            dragging: None,
             texture: None,
             frame_seq: 0,
         }
@@ -327,16 +330,45 @@ impl CamLightsApp {
         }
     }
 
-    fn preview_ui(&self, ui: &mut egui::Ui) {
-        match &self.texture {
-            Some(texture) => {
-                ui.centered_and_justified(|ui| {
-                    ui.add(egui::Image::new(egui::load::SizedTexture::from_handle(texture)).shrink_to_fit());
-                });
+    /// The live preview. Overlays can be dragged to reposition them.
+    fn preview_ui(&mut self, ui: &mut egui::Ui, status: &Status) {
+        let Some(texture) = &self.texture else {
+            ui.centered_and_justified(|ui| ui.label("No camera"));
+            return;
+        };
+        // Fit the frame into the panel, preserving its aspect ratio.
+        let area = ui.available_rect_before_wrap();
+        let size = texture.size_vec2();
+        let scale = (area.width() / size.x).min(area.height() / size.y);
+        let rect = egui::Rect::from_center_size(area.center(), size * scale);
+        let response = ui.allocate_rect(rect, egui::Sense::drag());
+        egui::Image::new(egui::load::SizedTexture::from_handle(texture)).paint_at(ui, rect);
+
+        let normalise = |pos: egui::Pos2| [(pos.x - rect.min.x) / rect.width(), (pos.y - rect.min.y) / rect.height()];
+        // Topmost first: later overlays are drawn over earlier ones.
+        let overlay_at = |point: [f32; 2]| {
+            status.overlay_bounds.iter().enumerate().rev().find_map(|(index, bounds)| {
+                bounds.filter(|b| (b[0]..=b[2]).contains(&point[0]) && (b[1]..=b[3]).contains(&point[1])).map(|_| index)
+            })
+        };
+
+        if response.drag_started()
+            && let Some(point) = response.interact_pointer_pos().map(normalise)
+            && let Some(index) = overlay_at(point).filter(|&i| i < self.overlays.len())
+        {
+            let position = self.overlays[index].position;
+            self.dragging = Some((index, [position[0] - point[0], position[1] - point[1]]));
+        }
+        if let Some((index, grab_offset)) = self.dragging {
+            if let (Some(point), Some(overlay)) = (response.interact_pointer_pos().map(normalise), self.overlays.get_mut(index)) {
+                overlay.position = [(point[0] + grab_offset[0]).clamp(0.0, 1.0), (point[1] + grab_offset[1]).clamp(0.0, 1.0)];
             }
-            None => {
-                ui.centered_and_justified(|ui| ui.label("No camera"));
+            if response.drag_stopped() || !response.dragged() {
+                self.dragging = None;
             }
+            ui.ctx().set_cursor_icon(egui::CursorIcon::Grabbing);
+        } else if response.hover_pos().map(normalise).and_then(overlay_at).is_some() {
+            ui.ctx().set_cursor_icon(egui::CursorIcon::Grab);
         }
     }
 }
@@ -359,14 +391,14 @@ impl eframe::App for CamLightsApp {
                 self.overlays_ui(ui, &status);
             });
         });
+        CentralPanel::default().show(ui, |ui| self.preview_ui(ui, &status));
+
         if self.controls != before.0 {
             *self.engine.shared().controls.lock().unwrap() = self.controls.clone();
         }
         if self.overlays != before.1 {
             *self.engine.shared().overlays.lock().unwrap() = self.overlays.clone();
         }
-
-        CentralPanel::default().show(ui, |ui| self.preview_ui(ui));
     }
 
     fn save(&mut self, storage: &mut dyn eframe::Storage) {
