@@ -1,0 +1,4 @@
+# Link the C runtime statically so CamLights.exe and the virtual camera DLL run on machines
+# without the Visual C++ redistributable (the Frame Server loads the DLL with no app folder).
+[target.x86_64-pc-windows-msvc]
+rustflags = ["-C", "target-feature=+crt-static"]
