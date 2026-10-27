@@ -53,11 +53,18 @@ No Visual C++ redistributable is needed: release builds link the C runtime stati
 
 ## Installation
 
-### Download
+### Installer (recommended)
 
-1. Download `CamLights-<version>.zip` from the [latest release](https://github.com/pdinsd/CamLights/releases/latest).
-2. Extract it anywhere, for example a folder in your user profile.
-3. Run `CamLights.exe`, then [install the virtual camera](#install-the-virtual-camera).
+1. Download `CamLights-Setup-<version>.exe` from the [latest release](https://github.com/pdinsd/CamLights/releases/latest).
+2. Run it and approve the administrator prompt. Setup installs CamLights, adds it to the Start menu and installs the virtual camera.
+3. Start CamLights and choose **CamLights Camera** in your video app.
+
+Uninstall from **Settings → Apps**; this also removes the virtual camera.
+
+### Portable zip
+
+1. Download `CamLights-<version>.zip` from the [latest release](https://github.com/pdinsd/CamLights/releases/latest) and extract it anywhere.
+2. Run `CamLights.exe`, then [install the virtual camera](#install-the-virtual-camera).
 
 The release binaries are not code-signed yet, so Windows SmartScreen may warn on first launch: choose **More info → Run anyway**.
 
@@ -69,7 +76,7 @@ cd CamLights
 .\scripts\package.ps1
 ```
 
-The script builds a release and writes `dist\CamLights-<version>.zip`, which contains:
+The script builds a release and writes `dist\CamLights-<version>.zip`, plus `dist\CamLights-Setup-<version>.exe` when [Inno Setup 6](https://jrsoftware.org/isinfo.php) is installed (from [`installer/CamLights.iss`](installer/CamLights.iss)). The zip contains:
 
 | File | Purpose |
 |---|---|
