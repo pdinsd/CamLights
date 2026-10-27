@@ -11,7 +11,10 @@ path = "src/main.rs"
 anyhow = "1.0.104"
 camlights-capture = { version = "0.1.0", path = "../camlights-capture" }
 camlights-core = { version = "0.1.0", path = "../camlights-core" }
+camlights-vcam-shared = { version = "0.1.0", path = "../camlights-vcam-shared" }
 eframe = { version = "0.37.0", features = ["persistence"] }
 env_logger = "0.11.11"
 log = "0.4.34"
+rfd = "0.17.2"
 serde = { version = "1.0.229", features = ["derive"] }
+windows = { version = "0.62.2", features = ["Win32_Foundation", "Win32_Media_MediaFoundation", "Win32_System_Com", "Win32_System_Registry", "Win32_System_Threading", "Win32_UI_Shell", "Win32_UI_WindowsAndMessaging"] }
